@@ -2,6 +2,8 @@
 
 Nap is a library that abstracts access to master-slave physical SQL servers topologies as a single logical database mimicking the standard `sql.DB` APIs.
 
+This particular version uses github.com/jmoiron/sqlx.  Not all methods are implemented, but extending this is simple.
+
 ## Install
 ```shell
 $ go get github.com/tsenart/nap

@@ -6,14 +6,16 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // DB is a logical database with multiple underlying physical databases
 // forming a single master multiple slaves topology.
 // Reads and writes are automatically directed to the correct physical db.
 type DB struct {
-	pdbs  []*sql.DB // Physical databases
-	count uint64    // Monotonically incrementing counter on each query
+	pdbs  []*sqlx.DB // Physical databases
+	count uint64     // Monotonically incrementing counter on each query
 }
 
 // Open concurrently opens each underlying physical db.
@@ -21,10 +23,10 @@ type DB struct {
 // one being used as the master and the rest as slaves.
 func Open(driverName, dataSourceNames string) (*DB, error) {
 	conns := strings.Split(dataSourceNames, ";")
-	db := &DB{pdbs: make([]*sql.DB, len(conns))}
+	db := &DB{pdbs: make([]*sqlx.DB, len(conns))}
 
 	err := scatter(len(db.pdbs), func(i int) (err error) {
-		db.pdbs[i], err = sql.Open(driverName, conns[i])
+		db.pdbs[i], err = sqlx.Open(driverName, conns[i])
 		return err
 	})
 
@@ -67,38 +69,6 @@ func (db *DB) Ping() error {
 	})
 }
 
-// Prepare creates a prepared statement for later queries or executions
-// on each physical database, concurrently.
-func (db *DB) Prepare(query string) (Stmt, error) {
-	stmts := make([]*sql.Stmt, len(db.pdbs))
-
-	err := scatter(len(db.pdbs), func(i int) (err error) {
-		stmts[i], err = db.pdbs[i].Prepare(query)
-		return err
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &stmt{db: db, stmts: stmts}, nil
-}
-
-// Query executes a query that returns rows, typically a SELECT.
-// The args are for any placeholder parameters in the query.
-// Query uses a slave as the physical db.
-func (db *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
-	return db.pdbs[db.slave(len(db.pdbs))].Query(query, args...)
-}
-
-// QueryRow executes a query that is expected to return at most one row.
-// QueryRow always return a non-nil value.
-// Errors are deferred until Row's Scan method is called.
-// QueryRow uses a slave as the physical db.
-func (db *DB) QueryRow(query string, args ...interface{}) *sql.Row {
-	return db.pdbs[db.slave(len(db.pdbs))].QueryRow(query, args...)
-}
-
 // SetMaxIdleConns sets the maximum number of connections in the idle
 // connection pool for each underlying physical db.
 // If MaxOpenConns is greater than 0 but less than the new MaxIdleConns then the
@@ -132,12 +102,12 @@ func (db *DB) SetConnMaxLifetime(d time.Duration) {
 }
 
 // Slave returns one of the physical databases which is a slave
-func (db *DB) Slave() *sql.DB {
+func (db *DB) Slave() *sqlx.DB {
 	return db.pdbs[db.slave(len(db.pdbs))]
 }
 
 // Master returns the master physical database
-func (db *DB) Master() *sql.DB {
+func (db *DB) Master() *sqlx.DB {
 	return db.pdbs[0]
 }
 
@@ -146,4 +116,24 @@ func (db *DB) slave(n int) int {
 		return 0
 	}
 	return int(1 + (atomic.AddUint64(&db.count, 1) % uint64(n-1)))
+}
+
+// Preparex prepares a statement that connects to the master.
+func (db *DB) Preparex(query string) (*sqlx.Stmt, error) {
+	return db.Master().Preparex(query)
+}
+
+// PreparexSlave prepares a statement that connects with one of the slaves.
+func (db *DB) PreparexSlave(query string) (*sqlx.Stmt, error) {
+	return db.Slave().Preparex(query)
+}
+
+// Select performs a sqlx select against one of the slaves.
+func (db *DB) Select(dest interface{}, query string, args ...interface{}) error {
+	return db.Slave().Select(dest, query, args...)
+}
+
+// QueryxSlave performs an sqlx Queryx call against one of the slaves.
+func (db *DB) QueryxSlave(query string, args ...interface{}) (*sqlx.Rows, error) {
+	return db.Slave().Queryx(query, args...)
 }
